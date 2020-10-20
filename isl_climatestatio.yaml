@@ -1,0 +1,246 @@
+esphome:
+  name: isl_climatestatio
+  platform: ESP8266
+  board: nodemcuv2
+
+wifi:
+  ssid: !secret ssid
+  password: !secret wifi_password
+
+  # Optional manual IP
+  manual_ip:
+    static_ip: 192.x.x.x
+    gateway: 192.x.x.1
+    dns1: 192.x.x.1
+    dns2: 8.8.8.8
+    subnet: 255.255.255.0
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Isl Climatestatio 10"
+    password: ""
+
+captive_portal:
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  password: !secret api_password
+
+ota:
+   password: !secret ota_password
+   safe_mode: True
+   
+web_server:
+  port: 80
+  auth:
+    username: admin
+    password: !secret web_server_password
+
+i2c:
+  sda: 5
+  scl: 4
+  scan: False
+  id: bus_a
+  
+#The load resistance on the board. Value in KiloOhms
+  - id: RLOAD
+    type: float
+    restore_value: no
+    initial_value: '1.025'
+
+#Calibration resistance at atmospheric CO2 level. Outdoor calibration data
+  - id: RZERO
+    type: float
+    restore_value: no
+    initial_value: '35.429'
+
+#Atmospheric CO2 level for calibration purposes. Outdoor CO2 level during calibration. Usually 450, but it's better to clarify.
+  - id: ATMOCO2
+    type: float
+    restore_value: no
+    initial_value: '450'
+
+#Parameters for calculating ppm of CO2 from sensor resistance
+#  Exponential regression:
+#  GAS      | a      | b
+#  CO       | 605.18 | -3.937  
+#  Alcohol  | 77.255 | -3.18 
+#  CO2      | 110.47 | -2.862
+#  Tolueno  | 44.947 | -3.445
+#  NH4      | 102.2  | -2.473
+#  Acetona  | 34.668 | -3.369
+  - id: PARA
+    type: float
+    restore_value: no
+    initial_value: '110.47'
+  - id: PARB
+    type: float
+    restore_value: no
+    initial_value: '-2.862'
+
+#Parameters to model temperature and humidity dependence
+  - id: CORA
+    type: float
+    restore_value: no
+    initial_value: '0.00035'
+  - id: CORB
+    type: float
+    restore_value: no
+    initial_value: '0.02718'
+  - id: CORC
+    type: float
+    restore_value: no
+    initial_value: '1.39538'
+  - id: CORD
+    type: float
+    restore_value: no
+    initial_value: '0.0018'
+  - id: CORE
+    type: float
+    restore_value: no
+    initial_value: '-0.003333333'
+  - id: CORF
+    type: float
+    restore_value: no
+    initial_value: '-0.001923077'
+  - id: CORG
+    type: float
+    restore_value: no
+    initial_value: '1.130128205'
+    
+# Here you need to indicate the supply voltage of the MQ135 sensor. It can be measured with a voltmeter. Please note that the rated power will not always be accurate.
+  - id: volt_resolution
+    type: float
+    restore_value: no
+    initial_value: '5.14'
+	
+# 1 for Exponential, 2 for Linear
+  - id: regression_method
+    type: int
+    restore_value: no
+    initial_value: '1'
+
+sensor:
+  - platform: htu21d
+    temperature:
+      name: "Temperature htu21d"
+      id: htu21d_temperature
+    humidity:
+      name: "Humidity"
+      id: htu21d_humidity
+      filters:
+      - lambda: if ((id(htu21d_temperature).state)>=0) {return (id(htu21d_humidity).raw_state + (25.0 - id(htu21d_temperature).state) * (-0.15));} else {return id(htu21d_humidity).raw_state;}
+    update_interval: 30s
+    
+  - platform: adc
+    pin: A0
+    name: "Gas ADC"
+    update_interval: 1s
+    filters:
+      - multiply: 3.3 # for NodeMcu ESP8266 v3 Lua
+    accuracy_decimals: 4
+    unit_of_measurement: V
+    id: sensor_volt
+
+  - platform: template
+    #Linearization of the temperature dependency curve under and above 20 degree C
+    #below 20degC: fact = a * t * t - b * t - (h - 33) * d
+    #above 20degC: fact = a * t + b * h + c
+    #this assumes a linear dependency on humidity
+    #getCorrectionFactor
+    name: "Correction Factor"
+    lambda: |-
+      if (id(htu21d_temperature).state<20) {
+        return (id(CORA) * id(htu21d_temperature).state * id(htu21d_temperature).state - id(CORB) *
+          id(htu21d_temperature).state + id(CORC) - (id(htu21d_humidity).state - 33.) * id(CORD));
+      } else {
+        return (id(CORE) * id(htu21d_temperature).state + id(CORF) * id(htu21d_humidity).state + id(CORG));
+      }
+    update_interval: 10s
+    accuracy_decimals: 6
+    id: correction_factor
+
+  - platform: template
+    #Get the resistance of the sensor, ie. the measurement value @return The sensor resistance in kOhm
+    # RS = [(VC x RL) / VRL] - RL
+    # RS_air = ((5.14*1.0)/sensor_volt)-1.0 Calculate RS in fresh air 
+    #getResistance
+    name: "Resistance"
+    lambda: |-
+      return ((id(volt_resolution)*id(RLOAD)/id(sensor_volt).state) - id(RLOAD));
+    update_interval: 5s
+    accuracy_decimals: 3
+    unit_of_measurement: kOm
+    id: resistance
+    
+  - platform: template
+    # Get the resistance of the sensor, ie. the measurement value correctedfor temp/hum @return The corrected sensor resistance kOhm
+    #getCorrectedResistance
+    name: "Corrected Resistance"
+    lambda: |-
+      return (id(resistance).state / id(correction_factor).state);
+    update_interval: 5s
+    accuracy_decimals: 3
+    unit_of_measurement: kOm
+    id: corrected_resistance
+
+  - platform: template
+    # Get the ppm of CO2 sensed (assuming only CO2 in the air). The ppm of CO2 in the air
+    #getPPM
+    name: "PPM CO2"
+    lambda: |-
+      if (id(regression_method)==1) {
+        return (id(PARA) * pow((id(resistance).state / id(RZERO)), id(PARB)));
+      } else {
+        return (pow(10, (log10(id(resistance).state / id(RZERO)) - id(PARB)) / id(PARA)));
+      }
+    update_interval: 5s
+    unit_of_measurement: ppm
+    id: ppm_co2
+
+  - platform: template
+    # Get the ppm of CO2 sensed (assuming only CO2 in the air), corrected  for temp. The ppm of CO2 in the air
+    #getCorrectedPPM
+    name: "Corrected PPM CO2"
+    lambda: |-
+      if (id(regression_method)==1) {
+        return (id(PARA) * pow((id(corrected_resistance).state / id(RZERO)), id(PARB)));
+      } else {
+        return (pow(10, (log10(id(corrected_resistance).state / id(RZERO)) - id(PARB)) / id(PARA)));
+      }
+    update_interval: 5s
+    unit_of_measurement: ppm
+    id: corrected_ppm_co2
+
+  - platform: template
+    # Get the resistance RZero of the sensor for calibration purposes. The sensor resistance RZero in kOhm
+    #getRZero
+    name: "RZero"
+    lambda: |-
+      return (id(resistance).state / pow((id(ATMOCO2) / id(PARA)), (1./id(PARB))));
+    filters:
+      - sliding_window_moving_average:
+          window_size: 15
+          send_every: 1
+    update_interval: 5s
+    accuracy_decimals: 3
+    unit_of_measurement: kOm
+    id: r_zero
+
+  - platform: template
+    # Get the corrected resistance RZero of the sensor for calibration purposes. The corrected sensor resistance RZERO in kOhm for ATMOCO2 level
+    #getCorrectedRZero
+    name: "CorrectedRZero"
+    lambda: |-
+      return (id(corrected_resistance).state / pow((id(ATMOCO2) / id(PARA)), (1./id(PARB))));
+    filters:
+      - sliding_window_moving_average:
+          window_size: 15
+          send_every: 1
+    update_interval: 5s
+    accuracy_decimals: 3
+    unit_of_measurement: kOm
+    id: corrected_r_zero
