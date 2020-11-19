@@ -45,6 +45,8 @@ i2c:
   scan: False
   id: bus_a
   
+globals:
+
 #The load resistance on the board. Value in KiloOhms
   - id: RLOAD
     type: float
@@ -110,13 +112,13 @@ i2c:
     type: float
     restore_value: no
     initial_value: '1.130128205'
-    
+
 # Here you need to indicate the supply voltage of the MQ135 sensor. It can be measured with a voltmeter. Please note that the rated power will not always be accurate.
   - id: volt_resolution
     type: float
     restore_value: no
     initial_value: '5.14'
-	
+
 # 1 for Exponential, 2 for Linear
   - id: regression_method
     type: int
